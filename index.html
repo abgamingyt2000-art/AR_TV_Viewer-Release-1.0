@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>AR TV Viewer</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,1,0" rel="stylesheet" />
+    
+    <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+                "@material/web/": "https://esm.sh/@material/web@1.4.1/"
+            }
+        }
+    </script>
+    
+    <script type="module">
+        import '@material/web/all.js';
+    </script>
+
+    <style>
+        :root {
+            --md-sys-color-primary: #A8C7FA;
+            --md-sys-color-primary-container: #0842A0;
+            --md-sys-color-on-primary-container: #D3E3FD;
+            --md-sys-color-surface: #111114;
+            --md-sys-color-on-surface: #E2E2E6;
+        }
+        
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000000;
+            font-family: system-ui, -apple-system, sans-serif;
+            touch-action: none;
+        }
+
+        html.ar-active, body.ar-active {
+            background-color: transparent !important;
+            background: transparent !important;
+        }
+        
+        .interactive { pointer-events: auto; }
+        .hide-scroll::-webkit-scrollbar { display: none; }
+        .hide-scroll { -ms-overflow-style: none; scrollbar-width: none; }
+
+        #ARButton {
+            bottom: 40px !important;
+            padding: 16px 32px !important;
+            border-radius: 28px !important;
+            background-color: var(--md-sys-color-primary-container) !important;
+            color: var(--md-sys-color-on-primary-container) !important;
+            font-weight: 600 !important;
+            border: none !important;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="startup-screen" class="absolute inset-0 flex flex-col items-center justify-center bg-black z-50 text-white p-6">
+        <span class="material-symbols-outlined text-6xl text-blue-400 mb-4">tv_options_edit_channels</span>
+        <h1 class="text-3xl font-bold mb-2">AR TV Viewer</h1>
+        <p class="text-gray-400 text-center max-w-sm mb-8">Visualize standard TV sizes in your space.</p>
+        <div id="ar-button-container" class="w-full flex justify-center"></div>
+    </div>
+
+    <div id="ar-overlay" class="hidden absolute inset-0 z-40 flex flex-col justify-between pointer-events-none">
+        <div class="p-6 flex justify-between items-start interactive mt-4">
+            <div class="bg-gray-900/80 backdrop-blur-md rounded-2xl p-4 border border-white/10">
+                <p class="text-xs text-gray-400 uppercase tracking-wider">Active Size</p>
+                <div class="text-3xl font-bold text-white"><span id="size-display">55</span>"</div>
+                <div id="ai-feedback" class="text-xs text-blue-300 mt-2 hidden max-w-[200px]"></div>
+            </div>
+            
+            <md-fab id="btn-ai" variant="surface" aria-label="Ask AI">
+                <md-icon slot="icon">smart_toy</md-icon>
+            </md-fab>
+        </div>
+
+        <div class="flex justify-center pointer-events-none mb-auto mt-8">
+            <div id="status-badge" class="bg-black/70 backdrop-blur-md px-6 py-3 rounded-full text-white text-sm font-medium border border-white/10 transition-opacity">
+                Scan floor slowly...
+            </div>
+        </div>
+
+        <div class="p-6 interactive pb-10 w-full">
+            <div class="bg-gray-900/90 backdrop-blur-xl rounded-[32px] p-3 flex gap-2 overflow-x-auto hide-scroll border border-white/10" id="size-carousel">
+            </div>
+        </div>
+    </div>
+
+    <md-dialog id="ai-modal" class="interactive">
+        <div slot="headline">Gemini Auto-Scale</div>
+        <form slot="content" id="form-id" method="dialog">
+            <p class="text-sm text-gray-600 mb-4">Enter your viewing distance (e.g., "9 feet").</p>
+            <md-outlined-text-field id="distance-input" label="Viewing Distance" class="w-full"></md-outlined-text-field>
+        </form>
+        <div slot="actions">
+            <md-text-button id="btn-cancel-ai">Cancel</md-text-button>
+            <md-filled-button id="btn-submit-ai">Calculate</md-filled-button>
+        </div>
+    </md-dialog>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { ARButton } from 'three/addons/webxr/ARButton.js';
+
+        // ==========================================
+        // CONFIG & STATE
+        // ==========================================
+        const apiKey = "AIzaSyCDUGqVt6U0JCqGOMof8vsT3ioEe7Jy2jw";
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`;
+
+        const SIZES = [43, 50, 55, 65, 75, 85];
+        let currentSize = 55;
+        let tvPlaced = false;
+
+        let scene, camera, renderer;
+        let reticle, tvGroup, screenMesh;
+        let hitTestSource = null;
+        let hitTestSourceRequested = false;
+
+        // ==========================================
+        // INITIALIZATION
+        // ==========================================
+        initAR();
+        buildUI();
+
+        function initAR() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setClearColor(0x000000, 0);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            scene.add(new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1));
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+            dirLight.position.set(0, 2, 0);
+            scene.add(dirLight);
+
+            const arButton = ARButton.createButton(renderer, {
+                requiredFeatures: ['hit-test', 'dom-overlay'],
+                domOverlay: { root: document.body }
+            });
+            document.getElementById('ar-button-container').appendChild(arButton);
+
+            renderer.xr.addEventListener('sessionstart', () => {
+                document.documentElement.classList.add('ar-active');
+                document.body.classList.add('ar-active');
+                document.getElementById('startup-screen').style.display = 'none';
+                document.getElementById('ar-overlay').style.display = 'flex';
+                document.getElementById('ar-overlay').classList.remove('hidden');
+            });
+
+            renderer.xr.addEventListener('sessionend', () => {
+                document.documentElement.classList.remove('ar-active');
+                document.body.classList.remove('ar-active');
+                document.getElementById('startup-screen').style.display = 'flex';
+                document.getElementById('ar-overlay').style.display = 'none';
+                resetARState();
+            });
+
+            const controller = renderer.xr.getController(0);
+            controller.addEventListener('select', onScreenTap);
+            scene.add(controller);
+
+            create3DObjects();
+            renderer.setAnimationLoop(renderLoop);
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        // ==========================================
+        // 3D OBJECT LOGIC
+        // ==========================================
+        function create3DObjects() {
+            reticle = new THREE.Mesh(
+                new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2),
+                new THREE.MeshBasicMaterial({ color: 0x4285F4 })
+            );
+            reticle.matrixAutoUpdate = false;
+            reticle.visible = false;
+            scene.add(reticle);
+
+            tvGroup = new THREE.Group();
+            tvGroup.visible = false;
+            scene.add(tvGroup);
+
+            screenMesh = new THREE.Mesh(
+                new THREE.BoxGeometry(1, 1, 0.05),
+                new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.2 })
+            );
+            tvGroup.add(screenMesh);
+
+            updateTVGeometry(currentSize);
+        }
+
+        function updateTVGeometry(inches) {
+            currentSize = inches;
+            const aspect = 16 / 9;
+            const diagMeters = inches * 0.0254; 
+            const height = diagMeters / Math.sqrt(aspect * aspect + 1);
+            const width = height * aspect;
+
+            screenMesh.geometry.dispose();
+            screenMesh.geometry = new THREE.BoxGeometry(width, height, 0.05);
+            screenMesh.position.y = height / 2;
+            
+            document.getElementById('size-display').innerText = inches;
+            document.querySelectorAll('.size-btn').forEach(btn => {
+                btn.style.setProperty('--md-sys-color-secondary-container', 
+                    parseInt(btn.dataset.size) === inches ? 'var(--md-sys-color-primary)' : 'transparent');
+            });
+        }
+
+        function onScreenTap() {
+            if (reticle.visible) {
+                tvGroup.position.setFromMatrixPosition(reticle.matrix);
+                const cameraPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+                tvGroup.rotation.y = Math.atan2(cameraPos.x - tvGroup.position.x, cameraPos.z - tvGroup.position.z);
+                
+                tvGroup.visible = true;
+                tvPlaced = true;
+                updateStatus("TV Placed. Tap elsewhere to move.", 3000);
+            }
+        }
+
+        function resetARState() {
+            tvPlaced = false;
+            tvGroup.visible = false;
+            document.getElementById('ai-modal').close();
+            updateStatus("Scan floor slowly...");
+        }
+
+        // ==========================================
+        // UI & AI LOGIC
+        // ==========================================
+        function buildUI() {
+            const carousel = document.getElementById('size-carousel');
+            SIZES.forEach(size => {
+                const btn = document.createElement('md-filled-tonal-button');
+                btn.className = 'size-btn flex-shrink-0';
+                btn.dataset.size = size;
+                btn.innerText = `${size}"`;
+                btn.onclick = () => {
+                    updateTVGeometry(size);
+                    document.getElementById('ai-feedback').classList.add('hidden');
+                };
+                carousel.appendChild(btn);
+            });
+            updateTVGeometry(currentSize);
+
+            const modal = document.getElementById('ai-modal');
+            document.getElementById('btn-ai').onclick = () => modal.show();
+            document.getElementById('btn-cancel-ai').onclick = () => modal.close();
+            document.getElementById('btn-submit-ai').onclick = handleAICall;
+        }
+
+        function updateStatus(text, timeout = 0) {
+            const badge = document.getElementById('status-badge');
+            badge.innerText = text;
+            badge.style.opacity = '1';
+            if (timeout > 0) {
+                setTimeout(() => badge.style.opacity = '0', timeout);
+            }
+        }
+
+        async function handleAICall() {
+            const inputEl = document.getElementById('distance-input');
+            const distance = inputEl.value.trim();
+            if (!distance) return;
+
+            const submitBtn = document.getElementById('btn-submit-ai');
+            submitBtn.innerText = "Thinking...";
+            submitBtn.disabled = true;
+
+            const prompt = `User viewing distance is "${distance}". Pick the optimal TV size from this list: ${SIZES.join(', ')}. Return valid JSON: {"size": number, "reason": "short explanation"}`;
+
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: prompt }] }],
+                        generationConfig: { responseMimeType: "application/json" }
+                    })
+                });
+
+                const data = await response.json();
+                let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+                rawText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+                
+                const result = JSON.parse(rawText);
+
+                let finalSize = parseInt(result.size);
+                if (!SIZES.includes(finalSize)) {
+                    finalSize = SIZES.reduce((prev, curr) => Math.abs(curr - finalSize) < Math.abs(prev - finalSize) ? curr : prev);
+                }
+
+                updateTVGeometry(finalSize);
+                
+                const feedbackEl = document.getElementById('ai-feedback');
+                feedbackEl.innerText = result.reason;
+                feedbackEl.classList.remove('hidden');
+                
+                document.getElementById('ai-modal').close();
+                inputEl.value = "";
+                
+                if (!tvPlaced) updateStatus(`AI suggests ${finalSize}". Tap reticle to place!`);
+
+            } catch (err) {
+                console.error("AI Error:", err);
+                updateStatus("AI Error. Check console.", 3000);
+                document.getElementById('ai-modal').close();
+            } finally {
+                submitBtn.innerText = "Calculate";
+                submitBtn.disabled = false;
+            }
+        }
+
+        // ==========================================
+        // RENDER LOOP
+        // ==========================================
+        function renderLoop(timestamp, frame) {
+            if (frame) {
+                const session = renderer.xr.getSession();
+                const referenceSpace = renderer.xr.getReferenceSpace();
+
+                if (!hitTestSourceRequested) {
+                    session.requestReferenceSpace('viewer').then(refSpace => {
+                        session.requestHitTestSource({ space: refSpace }).then(source => {
+                            hitTestSource = source;
+                        });
+                    });
+                    session.addEventListener('end', () => {
+                        hitTestSourceRequested = false;
+                        hitTestSource = null;
+                    });
+                    hitTestSourceRequested = true;
+                }
+
+                if (hitTestSource) {
+                    const hitTestResults = frame.getHitTestResults(hitTestSource);
+                    if (hitTestResults.length > 0) {
+                        const hit = hitTestResults[0];
+                        reticle.visible = true;
+                        reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
+                        if (!tvPlaced) updateStatus("Surface found! Tap to place.");
+                    } else {
+                        reticle.visible = false;
+                        if (!tvPlaced) updateStatus("Scan floor slowly...");
+                    }
+                }
+            }
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
