@@ -1,0 +1,9 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.ardevelopment.artvviewer",
+    "sha256_cert_fingerprints":
+    ["7A:59:0C:68:56:BE:AD:30:06:39:90:69:E4:7B:51:24:A7:13:BA:77:3D:ED:AB:CC:94:78:48:3B:B7:EF:55:39"]
+  }
+}]
